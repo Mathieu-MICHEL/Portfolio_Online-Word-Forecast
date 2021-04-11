@@ -1,0 +1,335 @@
+---
+title: "Milestone Report"
+subtitle: "Data Science Capstone Project"
+author: "M Michel"
+date: "2021-04-11"
+output: 
+  tufte::tufte_html: default
+---
+
+```{r setup, include=F}
+  
+  knitr::opts_chunk$set(echo = T)
+
+  library(devtools)
+  library(tidyverse)  
+  library(tidytext)
+  library(sentimentr)
+  library(lexicon)
+  library(wordcloud)
+  library(tufte)
+  library(knitr)
+  library(plotly)
+  library(htmltools)
+  library(shiny)
+
+
+  #  library(plotly) useless for now
+
+```
+
+This is an R Markdown document, using a **Tufte Handouts** style template.^[ R Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>. And as we happily use the **Tufte Handouts** format, please consider the following documentation <https://rstudio.github.io/tufte/>.]
+
+
+
+# Import and Cleaning
+
+We work preferably with the **tidytext** package, which is somewhat more intuitive and modern than the suggested **tm** package.
+
+
+## Full Data
+
+First, we load our data by using the **readr::read_lines** function and converting the data into **tibbles** on the fly:
+
+```{r import, echo=T, cache=T, warning=F}
+
+# unzip("Coursera-SwiftKey.zip")
+
+  US_twitter <- as_tibble(read_lines("final/en_US/en_US.twitter.txt"))
+  US_news <- as_tibble(read_lines("final/en_US/en_US.news.txt"))
+  US_blogs <- as_tibble(read_lines("final/en_US/en_US.blogs.txt"))
+
+  US_total <- rbind(US_twitter, US_news, US_blogs)
+
+```
+
+And just for the sake of it, here are the first lines of each documents:
+
+
+```{r showTwitter, echo=F, warning=F}
+
+  kable(US_twitter[1:10,], "html", row.names=1:10, 
+        col.names="Twitter")
+```
+
+```{r showNews, echo=F, warning=F}
+
+  kable(US_news[1:5,], "html", row.names=1:5, 
+        col.names="News")
+  
+```
+
+```{r showBlogs, echo=F, warning=F}
+
+  kable(US_blogs[1:5,], "html", row.names=1:5, 
+        col.names="Blogs")
+
+```
+
+```{r sumTable, echo=F, cache=T, warning=F}
+
+  US_tokenTwitter <- US_twitter%>%
+    unnest_tokens(word, value)
+
+  US_tokenNews <- US_news%>%
+    unnest_tokens(word, value)
+  
+  US_tokenBlogs <- US_blogs%>%
+    unnest_tokens(word, value)
+
+  X <- cbind(c(dim(US_twitter)[1],dim(US_news)[1],dim(US_blogs)[1]),
+    c(dim(US_tokenTwitter)[1],dim(US_tokenNews)[1],dim(US_tokenBlogs)[1]),
+    c(dim(unique(US_tokenTwitter))[1],
+      dim(unique(US_tokenNews))[1],
+      dim(unique(US_tokenBlogs))[1]))
+  
+  X <- cbind(c("Twitter","News","Blogs"),
+             X)
+  
+  kable(X, "html",
+        col.names = c("Source","#Lines","#Words","#UniqueWords"))
+
+```
+
+## Tokenized version
+
+Now, the **tidytext** package becomes pretty handy as we easily convert our text lines data into a tidy single-words document:  
+
+```{r token, echo=T, cache=T}
+
+  US_token <- US_total%>%
+    unnest_tokens(word, value)
+```
+
+```{r tokenPrint, echo=F, cache=T, warning=F, fig.margin = T}
+  kable(US_token[1:10,], "html", row.names=1:10, 
+        col.names="Each Word from the full corpus (1 to 10)")
+```
+
+## Cleaning profanities and foreign language chunks
+
+Let's say, I wouldn't be able to guess the role of a profanity or a foreign word in a sentence, and hence I'd better drop all sequences of words (the respective lines in my data set) that contain some.
+
+First, let's build a profanity and foreign language dictionnary:
+
+We bundle together lists of profanities from the **lexicon** package:
+
+```{r profanity, echo=T}
+  profanity_full <- unique(tolower(c(profanity_alvarez,
+  profanity_arr_bad,
+  profanity_banned,
+  profanity_racist,
+  profanity_zac_anger)))
+```
+
+```{r profanityPrint, echo=F, warning=F, fig.margin=T}
+  profanity.data <- as_tibble(profanity_full)
+  names(profanity.data) <- "word"
+
+  kable(profanity.data[1:10,], "html", row.names=1:10)
+
+```
+Oh my, that's bad indeed!
+
+And I have at my disposal lists of common words in other languages too!
+I use the website <https://1000mostcommonwords.com> to access common words lists in French and Spanish.
+
+```{r foreign, echo=T}
+  # French Words 
+  Words.fr <- as_tibble(read.csv("french-word-list-total_vMMi.csv"))
+  Words.fr2 <- Words.fr[1:50,] 
+  # I take only a small sample as it gets messy fast 
+  # due to lexical ambiguities 
+  
+  Only_fr <- Words.fr2[!Words.fr2$word %in% sw_fry_1000,]$word
+  Only_fr<- Only_fr[!(str_detect(Only_fr,"[A-Z]+")|str_detect(Only_fr,"\\?")|
+                        str_detect(Only_fr,"pour"))] 
+  # e.g. "pour" is ambiguous and means to/for in French! 
+  
+  # Spanish Words  
+  Words.sp <- as_tibble(read.csv("spanish-word-list-total_vMMi.csv"))
+  Words.sp2 <- Words.sp[1:50,]
+  
+  Only_sp <- Words.sp2[!Words.sp2$word %in% sw_fry_1000,]$word
+  Only_sp<- Only_sp[!(str_detect(Only_sp,"[A-Z]+")|str_detect(Only_sp,"\\?"))] 
+  
+```
+It could be relevant to do the exercise for more languages, and to find out a more sophisticated approach. Wikipedia has great entries on words ranked by frequency in different languages, and it's apparently a rich topic.
+
+Still, I can now build my 'clean' corpus:
+
+```{r clean, echo=T, results='hide', warning=F}
+
+  CleanCheck <- as_tibble(unique(c(Only_fr, Only_sp, profanity.data$word)))
+  names(CleanCheck) <- "word"
+
+  US_tokenClean <- US_token %>%
+    anti_join(CleanCheck, by = "word")
+
+```
+       
+# Exploratory Analysis
+
+
+I put first a classic cloud visualization for all words in the corpora, as well as among non-trivial words (just FYI, this doesn't particularly help the forecasting tool)
+
+```{r cloud, echo=F, cache=T, warning=F, fig.fullwidth = T}
+
+  US_tokenOrd <- US_tokenClean%>%
+      count(word) %>%
+      arrange(desc(n))
+
+  # define a nice color palette
+  pal <- brewer.pal(8,"Dark2")
+
+  # plot the 50 most common words
+  US_tokenOrd %>%
+    with(wordcloud(word, n, random.order = FALSE, 
+                   max.words = 50, colors=pal))
+
+  US_tokenOrd2 <- US_tokenClean%>%
+      anti_join(stop_words, by = "word")%>%
+      count(word) %>%
+      arrange(desc(n))
+  
+  # plot the 50 most common words
+  US_tokenOrd2 %>%
+    with(wordcloud(word, n, random.order = FALSE, 
+                   max.words = 50, colors=pal))
+  
+```
+
+And below the histogram for the 50 most frequent words out of 30 samples:  
+
+```{r plotWords1, cache=T, echo=F, warning=F, fig.fullwidth = T}
+
+  X <- tibble(name="the",freq=0)
+  
+  topX <- 50
+  
+  for (i in 1:30){
+  Samp <- as.logical(rbinom(dim(US_total)[1],1,.01)) 
+  
+  US_totalSamp <- US_total[Samp,]
+  
+  US_totalSampToken <- US_totalSamp%>%
+    unnest_tokens(word, value)%>%
+    count(word) %>%
+    arrange(desc(n))
+  
+  X[(topX*(i-1)+1):(topX*i),1]<-US_totalSampToken[1:topX,1]
+  X[(topX*(i-1)+1):(topX*i),2]<-US_totalSampToken[1:topX,2]/sum(US_totalSampToken[,2])
+  
+  }
+  
+  
+  a <- ggplot(X, aes(freq))
+  b <- a + geom_histogram(bins=100,aes(fill=name),alpha=.5) +
+    theme(legend.position = "none")
+  
+  ggplotly(
+    p = b,
+    width = 1200,
+    height = 600,
+    tooltip = "all",
+    dynamicTicks = FALSE,
+    layerData = 1,
+    originalData = TRUE,
+    source = "A"
+  )
+
+  Y <- aggregate(.~name,data=X,mean)
+
+```  
+ 
+  
+This plot shows the approximate frequency of the most common words covering around `r round(100*sum(Y$freq),0)`% of the full corpora.
+
+
+# Some simplification measures
+
+I suggest here some measures to be considered/implemented further on in the project.
+
+
+## Sinonyms
+
+Maybe using synonyms dictionary could help reduce the problem complexity.
+
+
+## Most Common Words
+
+As observed earlier with foreign languages, words frequency ranking is a well documented topic with sophisticated method associated to it. Checking common words that could be missing in the corpora could help too.
+
+## Size of samples
+
+The full corpus (as the sum of corpora), when tokenized as single words or bigrams is a very large vector. Sampling is required to work with it. We will need to think about sample size to ensure fast and accurate predictions. 
+
+# Training the creation of a words-Markov Chain
+
+A big upcoming step is to train the creation of a chain from any word to the next and to store it efficiently. 
+
+
+# Codding a reactive application
+
+Here I code a simple function forecasting the next word out of the existing corpora:
+
+```{r nextW, echo=T}
+
+US_bigrams <- US_totalSamp %>%
+  unnest_tokens(bigram, value, token = "ngrams", n = 2)
+
+
+nextW <- function(a) {
+  
+  pattern0 <- paste(a,"\\S",sep = " ")
+  A <- str_subset(US_bigrams$bigram, pattern0)
+  pattern <- paste("(?<=",a,"\\s)(\\w)+",sep = "")
+  as_tibble(str_extract(A,pattern))%>%
+    count(value) %>%
+    arrange(desc(n))
+}
+
+```
+
+This has still to be adapted when the input is nowhere to be found. And alternative version with different inputs can also be added (incomplete word, chain of 2 words...)
+
+Then it must be implemented in a reactive Shiny App!
+
+Below some draft coding of such application:
+
+```{r app, echo=T, eval=F}
+shinyApp(
+
+  ui = fluidPage(
+    titlePanel("Word Forecast"), 
+    textInput("word1", "First Word:",
+              value = "the"),
+    submitButton("What's next?"),
+    textOutput("word2")
+  ),
+  
+  server = function(input, output) {
+    output$word2 <- renderText({
+      as.character(nextW(input$word1)[1,1])
+    })
+  },
+  
+)
+```
+
+And you can find the app running here: https://mathieu-michel.shinyapps.io/wordforecast/
+
+
+# Some efficiency/speed analysis
+
+All previous steps will likely require some consideration of speed and accuracy and the choice of a trade-off.
